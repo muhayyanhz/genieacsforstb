@@ -1,23 +1,23 @@
 #!/bin/bash
 
-# Colors
+# COLORS
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-MAGENTA='\033[0;35m'
 CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
 BOLD='\033[1m'
 NC='\033[0m'
 
 spinner() {
     local pid=$1
-    local spinstr='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-    while ps -p $pid > /dev/null 2>&1; do
-        printf "${CYAN} [%c] ${NC}" "$spinstr"
-        spinstr=${spinstr#?}${spinstr%${spinstr#?}}
-        sleep 0.1
-        printf "\b\b\b\b\b\b"
+    local spin='-\|/'
+    local i=0
+    while kill -0 $pid 2>/dev/null; do
+        i=$(( (i+1) %4 ))
+        printf "\r${CYAN}[%c]${NC}" "${spin:$i:1}"
+        sleep .1
     done
 }
 
@@ -31,9 +31,9 @@ run_command() {
     wait $!
 
     if [ $? -eq 0 ]; then
-        echo -e "${GREEN}Done${NC}"
+        echo -e "\r${GREEN}$msg ✓${NC}"
     else
-        echo -e "${RED}Failed${NC}"
+        echo -e "\r${RED}$msg FAILED${NC}"
         exit 1
     fi
 }
@@ -70,54 +70,45 @@ echo -e "${NC}"
 }
 
 if [ "$EUID" -ne 0 ]; then
- echo "Run script as root"
+ echo "Run as root"
  exit
 fi
 
 print_banner
 
-total_steps=16
-current_step=0
+echo
+echo -e "${MAGENTA}${BOLD}Installing GenieACS...${NC}"
+echo
 
-echo -e "\n${MAGENTA}${BOLD}Starting GenieACS Installation${NC}\n"
+run_command "apt update -y" "Updating system"
 
-run_command "apt update -y" "Updating system ($(( ++current_step ))/$total_steps)"
+run_command "apt install -y curl gnupg build-essential logrotate lsb-release" "Installing base packages"
 
-run_command "apt install -y curl gnupg build-essential logrotate lsb-release" "Installing base packages ($(( ++current_step ))/$total_steps)"
-
-# Swap
+# SWAP (important for STB)
 if ! swapon --show | grep -q swap; then
-run_command "fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile && echo '/swapfile none swap sw 0 0' >> /etc/fstab" "Creating swap memory ($(( ++current_step ))/$total_steps)"
-else
-current_step=$((current_step+1))
+run_command "fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile && echo '/swapfile none swap sw 0 0' >> /etc/fstab" "Creating swap"
 fi
 
-# NodeJS
-run_command "curl -fsSL https://deb.nodesource.com/setup_18.x | bash -" "Adding NodeJS repo ($(( ++current_step ))/$total_steps)"
+# NODEJS
+run_command "curl -fsSL https://deb.nodesource.com/setup_18.x | bash -" "Adding NodeJS repo"
 
-run_command "apt install -y nodejs" "Installing NodeJS ($(( ++current_step ))/$total_steps)"
+run_command "apt install -y nodejs" "Installing NodeJS"
 
-# MongoDB Repo
-run_command "curl -fsSL https://pgp.mongodb.com/server-4.4.asc | gpg --dearmor -o /usr/share/keyrings/mongodb.gpg" "Adding MongoDB key ($(( ++current_step ))/$total_steps)"
+# MONGODB (DEBIAN VERSION - STABLE)
+run_command "apt install -y mongodb-server" "Installing MongoDB"
 
-run_command "echo 'deb [ arch=arm64 signed-by=/usr/share/keyrings/mongodb.gpg ] https://repo.mongodb.org/apt/debian bullseye/mongodb-org/4.4 main' > /etc/apt/sources.list.d/mongodb-org.list" "Adding MongoDB repo ($(( ++current_step ))/$total_steps)"
+run_command "systemctl enable mongodb" "Enable MongoDB"
 
-run_command "apt update -y" "Updating repo ($(( ++current_step ))/$total_steps)"
+run_command "systemctl start mongodb" "Start MongoDB"
 
-run_command "apt install -y mongodb-org || apt install -y mongodb" "Installing MongoDB ($(( ++current_step ))/$total_steps)"
+# GENIEACS
+run_command "npm install -g genieacs@1.2.13" "Installing GenieACS"
 
-run_command "systemctl enable mongod || systemctl enable mongodb" "Enabling MongoDB ($(( ++current_step ))/$total_steps)"
+run_command "useradd --system --no-create-home --user-group genieacs || true" "Creating genieacs user"
 
-run_command "systemctl start mongod || systemctl start mongodb" "Starting MongoDB ($(( ++current_step ))/$total_steps)"
+run_command "mkdir -p /opt/genieacs/ext /var/log/genieacs" "Creating directories"
 
-# Install GenieACS
-run_command "npm install -g genieacs@1.2.13" "Installing GenieACS ($(( ++current_step ))/$total_steps)"
-
-run_command "useradd --system --no-create-home --user-group genieacs || true" "Creating genieacs user ($(( ++current_step ))/$total_steps)"
-
-run_command "mkdir -p /opt/genieacs/ext /var/log/genieacs" "Creating directories ($(( ++current_step ))/$total_steps)"
-
-run_command "chown -R genieacs:genieacs /opt/genieacs /var/log/genieacs" "Setting permissions ($(( ++current_step ))/$total_steps)"
+run_command "chown -R genieacs:genieacs /opt/genieacs /var/log/genieacs" "Setting permissions"
 
 cat <<EOF > /opt/genieacs/genieacs.env
 GENIEACS_CWMP_ACCESS_LOG_FILE=/var/log/genieacs/cwmp.log
@@ -139,7 +130,7 @@ do
 cat <<EOF > /etc/systemd/system/genieacs-$service.service
 [Unit]
 Description=GenieACS $service
-After=network.target
+After=network.target mongodb.service
 
 [Service]
 User=genieacs
@@ -171,16 +162,8 @@ cat <<EOF > /etc/logrotate.d/genieacs
 }
 EOF
 
-echo -e "\n${MAGENTA}${BOLD}Service Status${NC}"
-
-for service in mongod mongodb genieacs-cwmp genieacs-nbi genieacs-fs genieacs-ui
-do
-status=$(systemctl is-active $service 2>/dev/null)
-
-if [ "$status" = "active" ]; then
-echo -e "${GREEN}✔ $service running${NC}"
-fi
-done
-
-echo -e "\n${GREEN}${BOLD}GenieACS installation completed!${NC}"
-echo -e "${CYAN}Access UI: http://SERVER-IP:3000${NC}"
+echo
+echo -e "${GREEN}${BOLD}GenieACS installation completed${NC}"
+echo
+echo -e "${CYAN}UI: http://SERVER-IP:3000${NC}"
+echo
